@@ -9,8 +9,10 @@ Ele lê o arquivo teste.t3, interpreta as linhas e gera o código Julia correspo
 Ele suporta definições de variáveis e comandos de impressão simples.
 ### 2025-11-13: Versão 0.2 criada:
 Equações matemáticas na definição de variáveis agora são suportadas.
-Exemplo: 
+Exemplo:
+´´´ 
     2x = 3 + 4
+´´´
 quando x for printado, será avaliado como 3.5.
 também funciona com outras incógnitas, mas a única modificada é a primeira encontrada na expressão.
 ### 2025-11-15: Versão 0.3 criada:
