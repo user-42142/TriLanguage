@@ -5,7 +5,7 @@ settings = ArgParseSettings()
     "input_file"
         help = "Arquivo a ser compilado"
         arg_type = String
-        default = "teste.t3"
+        default = "teste.mrl"
     "--output"
         help = "Saída do compilador"
         arg_type = String
@@ -16,20 +16,40 @@ settings = ArgParseSettings()
 end
 args = parse_args(settings)
 texto = read(args["input_file"], String)
-lines = split(texto, '\n')
+function compile(args, texto, __vars__)
 #remover comentários
-for i in eachindex(lines)
-    if occursin("#", lines[i])
-        partes = split(lines[i], "#")
-        # contar aspas corretamente (char -> boolean)
-        if count(ch -> ch == '"', partes[1]) % 2 == 0
-            lines[i] = partes[1]
-        end
-        if count(ch -> ch == '"', lines[i]) % 2 != 0
-            error("Comentário inválido na linha $(i): aspas não fechadas.")
+incomment = false
+instring = false
+inchar = false
+lbracket = 0
+previnslash = false
+newline = ""
+for char in texto
+    inslash = false
+    if char == '\\' 
+        inslash = true
+    end
+    if char == '"' && !inchar && !previnslash
+        instring = !instring
+    end
+    if char == ''' && !instring && !previnslash
+        inchar = !inchar
+    end
+    if !incomment && char == '(' && !inchar && !instring
+        incomment = true
+    elseif incomment && char == ')' && !inchar && !instring
+        incomment = false
+    elseif !incomment
+        if (instring || inchar) && char == '\n'
+            newline *= "\\n"
+        else
+            newline *= char
         end
     end
+    previnslash = inslash
 end
+texto = newline
+lines = split(texto, '\n')
 function extrair_valores(linha::AbstractString, padroes::Vector{String})
     for padrao in padroes
         # Escapar caracteres regex perigosos
@@ -53,8 +73,6 @@ end
 function limpar_floats(texto)
     replace(texto, r"(\d+)\.0+\b" => s"\1")
 end
-
-using Symbolics
 
 function resolver_equacao(lhs::AbstractString, rhs::AbstractString, varname::AbstractString)
     function expressao_simples(txt)
@@ -125,28 +143,25 @@ function resolver_equacao(lhs::AbstractString, rhs::AbstractString, varname::Abs
         return limpar_floats("$(varname) = $(string(sol_simp))")
     end
 end
-function substituir_vars(texto::AbstractString, lista)
-    # aceitar tanto {vars[n]} quanto {vals[n]}
-    regex = r"\{(?:vars|vals)\[(\d+)\]\}"
-    io = IOBuffer()
-    pos = 1
+function substituir_vars(texto::AbstractString, lista, funcs=nothing, __vars__=nothing)
+    resultado = texto
+    
+    # Substituir {vals[i]} por valores da lista
+    regex = r"\{vals\[(\d+)\]\}"
     for m in eachmatch(regex, texto)
-        start = m.offset
-        stop = m.offset + lastindex(m.match) - 1
-        n = parse(Int, m.captures[1])
-        print(io, texto[pos:start-1])
-        print(io, lista[n])
-        pos = stop + 1
+        idx = parse(Int, m.captures[1])
+        if idx >= 1 && idx <= length(lista)
+            valor = lista[idx]
+            # NÃO substituir nomes de variáveis aqui — faremos isso apenas após aplicar as funções
+            resultado = replace(resultado, m.match => valor)
+        end
     end
-    print(io, texto[pos:end])
-    String(take!(io))
+    
+    return resultado
 end
 
 
 
-
-
-__vars__ = String[]
 
 # registra/retorna placeholder para um nome de variável (aceita nomes com espaços)
 function get_var_placeholder(nome::AbstractString)
@@ -168,7 +183,7 @@ defsvars = ["{val}{spaces}={spaces}{val}",
             "define {val} como {val}", 
             "set {val} to {val}", 
             "{val} agora é <opt>igual a </opt>{val}", 
-            "{val} now is <opt>equal to </opt>{val}",
+            "{val} now is <opt>equal to</opt>{val}",
             "{val} passa a ser <opt>igual a </opt>{val}",
             "{val} se torna {val}",
             "declare {val} como {val}",
@@ -239,16 +254,74 @@ readlines = ["readline",
              "<opt>a </opt> entrada do teclado",
              "<opt>the </opt>keyboard's input",
              "<opt>o </opt>texto escrito pelo usuário"]
+increments = [
+              "incremente {val} em {val}",
+              "increment {val} by {val}",
+              "{val} += {val}",
+              "adicionar <opt>a</opt><opt>á variável</opt> {val} <opt>o </opt><opt>valor</opt><opt>número</opt><opt> de</opt> {val}",
+              "add to<opt> the variable</opt> {val} <opt>the </opt><opt>value</opt><opt>number</opt><opt> of</opt> {val}"
+]
+increments2 = [
+              "incremente {val}",
+              "increment {val}",
+              "{val} ++"
+]
+decrements = [
+              "<opt>decremente</opt><opt>tire</opt> <opt>de </opt>{val} <opt>o valor </opt>{val}",
+              "decrement {val} by {val}",
+              "{val} -= {val}",
+]
+decrements2 = [
+              "decremente {val}",
+              "decrement {val}",
+              "{val} --"
+]
+multiplies = [
+              "multiplique {val} por {val}",
+              "multiply {val} by {val}",
+              "{val} *= {val}",
+]
+divides = [
+              "divida {val} por {val}",
+              "divide {val} by {val}",
+              "{val} /= {val}",
+]
+elevates = [
+              "eleve {val} a {val}",
+              "raise {val} to the power of {val}",
+              "{val} ^= {val}",
+]
+plusigns = [" mais ", " plus "]
+minusigns = [" menos ", " minus "]
+timesigns = [" vezes ", " multiplied by ", " times ", "<opt> junto</opt> com <opt>o texto </opt>", "<opt> together</opt> with <opt>the text </opt>"]
+divsigns = [" dividido por ", " divided by "]
+squaredsigns = [" <opt>elevado </opt>ao quadrado", " squared "]
+raisedsigns = [" elevado <opt>a</opt><opt>á potência de</opt> ", " <opt>raised </opt>to the power of "]
+modsigns = [" mod "]
 funcs = Dict(defsvars => "var", 
              impnls => "print({vals[1]})",
              imprs => "println({vals[1]})",
              inputsquest => "input({vals[1]})",
              readlines => "readline()",
-             ["\$"] => "\\\$")
-strfuncs = Dict(["\\{{val}}"] => "{{vals[1]}}",
-                ["{{val}}"] => "\$({vals[1]})")
-             
+             increments => "{vals[1]} = {vals[1]} + {vals[2]}",
+             increments2 => "{vals[1]} = {vals[1]} + 1",
+             decrements => "{vals[1]} = {vals[1]} - {vals[2]}",
+             decrements2 => "{vals[1]} = {vals[1]} - 1",
+             multiplies => "{vals[1]} = {vals[1]} * {vals[2]}",
+             divides => "{vals[1]} = {vals[1]} / {vals[2]}",
+             elevates => "{vals[1]} = {vals[1]} ^ {vals[2]}",
+             plusigns => " + ",
+             minusigns => " - ",
+             timesigns => " * ",
+             divsigns => " / ",
+             squaredsigns => " ^ 2 ",
+             raisedsigns => " ^ ",
+             modsigns => " % ",
+             ["["] => "(",
+             ["]"] => ")",
+            )
 comandos = []
+
 for linha_sub in lines
     linha = strip(String(linha_sub))
     if isempty(linha)
@@ -265,92 +338,180 @@ for linha_sub in lines
         if isnothing(vals)
             continue
         end
-
-        # Ajuste de sintaxe em strings usando strfuncs (ex: {{val}} -> $(val), \{{val}} -> {val})
-        for i in eachindex(vals)
-            for (ks, vs) in strfuncs
-                inner = extrair_valores(vals[i], ks)
-                if inner !== nothing
-                    # substituir usando o template definido em strfuncs
-                    vals[i] = substituir_vars(vs, inner)
-                    break
-                end
-            end
-        end
-
         push!(comandos,(v,vals))
         break
     end
-    if args["debug"]
-        println("Linha não reconhecida: ", linha)
-    end
 end
+
+
 # COMPILAR PARA JULIA
 julia_code = "function input(question)
     print(question)
     return readline()
 end
 "
+
 for comando in comandos
-    global julia_code
     tipo, valores = comando
     if args["debug"]
         println("Processando comando do tipo '$tipo' com valores: ", valores)
+    end
+    if tipo == "nr"
+        julia_code *= valores[1] * "\n"
+        continue
     end
     if tipo == "var"
         nome_var = valores[1]
         valor_var = valores[2]
 
-        # Registrar nome completo da variável e usar placeholder
-        placeholder = get_var_placeholder(nome_var)
-        # Substituir ocorrências literais do nome na expressão por placeholder
-        # (nome_var vem do capture {val} e deve corresponder exatamente)
-        nome_var_sub = replace(nome_var, nome_var => placeholder)
-        valor_var_sub = replace(valor_var, nome_var => placeholder)
+        # PRIMEIRO: Substituir operações matemáticas ANTES de processar variáveis
+        valor_var = replace(valor_var, "mais" => "+", "menos" => "-", "vezes" => "*", "dividido por" => "/", "elevado a" => "^")
+        valor_var = replace(valor_var, r"^\s+|\s+$" => "")  # remover espaços extras
+        nome_var = replace(nome_var, "mais" => "+", "menos" => "-", "vezes" => "*", "dividido por" => "/", "elevado a" => "^")
+        nome_var = replace(nome_var, r"^\s+|\s+$" => "")  # remover espaços extras
 
-        # Tentar casar o RHS com outros padrões (por exemplo perguntas) e convertê‑lo
-        # em um template de código (ex: input("...")) usando funcs.
+        # Detectar/registrar e substituir nomes (podem conter espaços) no nome_var
+        matches = [m.match for m in eachmatch(r"[A-Za-zÁÀÂÃÉÊÍÓÔÕÚÇáàâãéêíóôõúç_][A-Za-zÁÀÂÃÉÊÍÓÔÕÚÇáàâãéêíóôõúç0-9_ ]*", nome_var)]
+        if isempty(matches)
+            continue
+        end
+        for n in matches
+            placeholder = get_var_placeholder(n)
+            esc = replace(n, r"([\\\.\+\*\?\[\]\(\)\^\$\|])" => s"\\\1")
+            pattern = Regex("(?<![A-Za-z0-9_])" * esc * "(?![A-Za-z0-9_])")
+            nome_var = replace(nome_var, pattern => placeholder)
+        end
+
+        # --- NOVO: detectar e aplicar padrões/funções dentro do valor_var ---
+        # tenta casar padrões de `funcs` dentro do valor (ex.: frases de input)
         for (kp, vp) in funcs
-            if vp != "var"  # ignorar padrões de definição de variável
-                vals_match = extrair_valores(valor_var_sub, kp)
-                if vals_match !== nothing
-                    # antes de aplicar substituir_vars, transformar possíveis nomes já registrados
-                    vals_match = valores_para_placeholders(vals_match)
-                    valor_var_sub = substituir_vars(vp, vals_match)
+            # se o padrão contém {val}, tente extrair valores do valor_var
+            if any(contains.(kp, "{val}"))
+                vals_inner = extrair_valores(valor_var, kp)
+                if vals_inner !== nothing
+                    # gera substituição aplicando os {vals[i]} capturados
+                    valor_var = substituir_vars(vp, vals_inner, funcs, __vars__)
                     break
+                end
+            else
+                # padrões sem {val} — substituições literais das variantes
+                for s in kp
+                    if occursin(s, valor_var)
+                        valor_var = replace(valor_var, s => vp)
+                    end
+                end
+            end
+        end
+        # --- fim do bloco novo ---
+
+        # Processar nomes de variáveis no valor_var
+        # Substituir ocorrências de variáveis já registradas (aceita nomes com espaços)
+        if __vars__ !== nothing
+            for n in __vars__
+                if occursin(n, valor_var)
+                    esc = replace(n, r"([\\\.\+\*\?\[\]\(\)\^\$\|])" => s"\\\1")
+                    pattern = Regex("(?<![A-Za-z0-9_])" * esc * "(?![A-Za-z0-9_])")
+                    idx = findfirst(x -> x == n, __vars__)
+                    placeholder = "variable_$idx"
+                    valor_var = replace(valor_var, pattern => placeholder)
                 end
             end
         end
 
-        #identificar o primeiro nome de variável na definição (agora deve ser placeholder válido)
-        m = match(r"[A-Za-z_]\w*", nome_var_sub*"="*valor_var_sub)
+        nome_var_sub = String(nome_var)
+        valor_var_sub = String(valor_var)
+
+        m = match(r"[A-Za-z_]\w*", nome_var_sub)
         if isnothing(m)
             continue
         end
         varname = m.match
         equacao_resolvida = resolver_equacao(nome_var_sub, valor_var_sub, varname)
+
         julia_code *= equacao_resolvida * "\n"
         continue
     end
 
-    # Para comandos não-var: substituir valores que sejam nomes registrados por placeholders
-    valores_sub = valores_para_placeholders(valores)
-
-    nova_linha = substituir_vars(tipo,valores_sub)
+    # Para comandos não-var: processar PRIMEIRO as funções, DEPOIS as variáveis
+    nova_linha = substituir_vars(tipo, valores, funcs, __vars__)
+    
+    # Processar operações matemáticas dentro de strings
+    for (kp, vp) in funcs
+        nova_linha = replace(nova_linha, kp[1] => vp)
+    end
+    
+    # Agora processar nomes de variáveis DEPOIS das funções
+    matches_final = [m.match for m in eachmatch(r"[A-Za-zÁÀÂÃÉÊÍÓÔÕÚÇáàâãéêíóôõúç_][A-Za-zÁÀÂÃÉÊÍÓÔÕÚÇáàâãéêíóôõúç0-9_ ]*", nova_linha)]
+    # ordenar por comprimento decrescente para evitar substituições parciais (ex: "a" dentro de "variable_1")
+    sort!(matches_final, by=length, rev=true)
+    for n in matches_final
+        idx = findfirst(x -> x == n, __vars__)
+        if idx !== nothing
+            placeholder = "variable_$idx"
+            esc = replace(n, r"([\\\.\+\*\?\[\]\(\)\^\$\|])" => s"\\\1")
+            pattern = Regex("(?<![A-Za-z0-9_])" * esc * "(?![A-Za-z0-9_])")
+            nova_linha = replace(nova_linha, pattern => placeholder)
+        end
+    end
+    
     julia_code *= nova_linha * "\n"
 end
+
+# AGORA converter { em $( e } em ) APENAS em strings dentro do código gerado
+function converter_interpolacao(codigo::String)
+    resultado = IOBuffer()
+    instring = false
+    previnslash = false
+    lbracket = 0
+    
+    for char in codigo
+        inslash = char == '\\'
+        
+        if char == '"' && !previnslash
+            instring = !instring
+            print(resultado, char)
+        elseif instring && char == '{' && !previnslash && lbracket <= 0
+            lbracket = 1
+            print(resultado, "\$(")
+        elseif instring && char == '{' && !previnslash
+            lbracket += 1
+            print(resultado, char)
+        elseif instring && char == '}' && !previnslash && lbracket > 0
+            lbracket -= 1
+            print(resultado, ")")
+        elseif instring && char == '}' && !previnslash
+            lbracket -= 1
+            print(resultado, char)
+        elseif instring && char == '$' && !previnslash
+            print(resultado, "\\\$")
+        else
+            print(resultado, char)
+        end
+        
+        previnslash = inslash
+    end
+    
+    String(take!(resultado))
+end
+
+julia_code = converter_interpolacao(julia_code)
+
 if args["debug"]
     println("Código Julia gerado:\n", julia_code)
 end
+julia_code
+end
+code = compile(args,texto,[])
+
 # SALVAR CÓDIGO JULIA
 if isnothing(args["output"])
-   output = replace(args["input_file"],".t3" => ".jl")
-   output = replace(output,".trilang" => ".jl")
+   output = replace(args["input_file"],".mrl" => ".jl")
+   output = replace(output,".marley" => ".jl")
 else
     output = args["output"]
 end
 open(output, "w") do file
-    write(file, julia_code)
+    write(file, code)
 end
 if args["debug"]
     println("Código Julia salvo em $output")
